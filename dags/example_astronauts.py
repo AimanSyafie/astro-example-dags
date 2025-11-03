@@ -27,16 +27,18 @@ import requests
 import pandas as pd
 import math
 import time
+from pathlib import Path
 
 
 # Define the basic parameters of the DAG, like schedule and start_date
 @dag(
     start_date=datetime(2024, 1, 1),
-    schedule="@daily",
+    schedule=None,  # DAG is paused - set to "@daily" to re-enable
     catchup=False,
     doc_md=__doc__,
     default_args={"owner": "Astro", "retries": 3},
     tags=["example"],
+    is_paused_upon_creation=True,
 )
 def example_astronauts():
     # Define tasks
@@ -229,6 +231,116 @@ def example_astronauts():
         return tracking_data
 
     @task
+    def load_historical_spacecraft_data(**context) -> pd.DataFrame:
+        """
+        Load historical spacecraft tracking data from file storage.
+        If file doesn't exist, return empty DataFrame with proper structure.
+        """
+        # Define storage path for historical data
+        data_dir = Path("/tmp/astronaut_history")
+        data_dir.mkdir(exist_ok=True)
+        history_file = data_dir / "spacecraft_history.csv"
+
+        if history_file.exists():
+            try:
+                df_history = pd.read_csv(history_file)
+                print(f"Loaded {len(df_history)} historical spacecraft records")
+                return df_history
+            except Exception as e:
+                print(f"Error loading history: {e}. Starting fresh.")
+                return pd.DataFrame(
+                    columns=[
+                        "timestamp",
+                        "date",
+                        "astronaut_count",
+                        "spacecraft_speed_kmh",
+                        "spacecraft_speed_kms",
+                        "trajectory_bearing",
+                        "trajectory_direction",
+                        "latitude",
+                        "longitude",
+                        "altitude_km",
+                        "countries",
+                        "companies",
+                    ]
+                )
+        else:
+            print("No historical data found. Starting new history.")
+            return pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "date",
+                    "astronaut_count",
+                    "spacecraft_speed_kmh",
+                    "spacecraft_speed_kms",
+                    "trajectory_bearing",
+                    "trajectory_direction",
+                    "latitude",
+                    "longitude",
+                    "altitude_km",
+                    "countries",
+                    "companies",
+                ]
+            )
+
+    @task
+    def save_spacecraft_history(
+        astronauts: list[dict], tracking: dict, history_df: pd.DataFrame, **context
+    ) -> pd.DataFrame:
+        """
+        Append current spacecraft data to historical records and save to file.
+        Returns updated historical DataFrame for analysis.
+        """
+        # Get current timestamp
+        from datetime import datetime as dt
+
+        current_time = dt.now()
+
+        # Extract astronaut data
+        number_of_people = context["ti"].xcom_pull(
+            task_ids="get_astronauts", key="number_of_people_in_space"
+        )
+        countries = [a.get("country", "Unknown") for a in astronauts]
+        companies = [a.get("company", "Unknown") for a in astronauts]
+
+        # Create new record
+        new_record = pd.DataFrame(
+            [
+                {
+                    "timestamp": tracking["timestamp"],
+                    "date": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "astronaut_count": number_of_people,
+                    "spacecraft_speed_kmh": tracking["velocity_kmh"],
+                    "spacecraft_speed_kms": tracking["velocity_kms"],
+                    "trajectory_bearing": tracking["trajectory_bearing"],
+                    "trajectory_direction": tracking["trajectory_direction"],
+                    "latitude": tracking["latitude"],
+                    "longitude": tracking["longitude"],
+                    "altitude_km": tracking["altitude_km"],
+                    "countries": ", ".join(set(countries)),
+                    "companies": ", ".join(set(companies)),
+                }
+            ]
+        )
+
+        # Append to history
+        updated_history = pd.concat([history_df, new_record], ignore_index=True)
+
+        # Keep only last 100 records to prevent file from growing too large
+        if len(updated_history) > 100:
+            updated_history = updated_history.tail(100)
+
+        # Save to file
+        data_dir = Path("/tmp/astronaut_history")
+        data_dir.mkdir(exist_ok=True)
+        history_file = data_dir / "spacecraft_history.csv"
+
+        updated_history.to_csv(history_file, index=False)
+        print(f"Saved {len(updated_history)} records to spacecraft history")
+
+        return updated_history
+
+    @task
     def combine_data(
         astronauts: list[dict], weather: dict, tracking: dict, **context
     ) -> pd.DataFrame:
@@ -270,69 +382,133 @@ def example_astronauts():
         return df
 
     @task
-    def analyze_correlation(df: pd.DataFrame) -> None:
+    def analyze_correlation(current_df: pd.DataFrame, history_df: pd.DataFrame) -> None:
         """
         Analyze correlation between astronaut count, spacecraft tracking data (speed, trajectory),
-        and weather variables. Note: This is a single data point example. In production,
-        you'd collect historical data over time to perform meaningful correlation analysis.
+        and weather variables using both current and historical data.
         """
         print("=" * 70)
         print("CORRELATION ANALYSIS - ASTRONAUTS, SPACECRAFT TRACKING & WEATHER")
         print("=" * 70)
         print("\nCurrent Data Point:")
-        print(f"  Astronauts in space: {df['astronaut_count'].iloc[0]}")
-        print(f"  Countries: {df['countries'].iloc[0]}")
-        print(f"  Companies: {df['companies'].iloc[0]}")
+        print(f"  Astronauts in space: {current_df['astronaut_count'].iloc[0]}")
+        print(f"  Countries: {current_df['countries'].iloc[0]}")
+        print(f"  Companies: {current_df['companies'].iloc[0]}")
         print("\nSpacecraft Tracking:")
         print(
-            f"  Speed: {df['spacecraft_speed_kmh'].iloc[0]} km/h ({df['spacecraft_speed_kms'].iloc[0]} km/s)"
+            f"  Speed: {current_df['spacecraft_speed_kmh'].iloc[0]} km/h ({current_df['spacecraft_speed_kms'].iloc[0]} km/s)"
         )
         print(
-            f"  Trajectory: {df['trajectory_direction'].iloc[0]} ({df['trajectory_bearing'].iloc[0]}°)"
+            f"  Trajectory: {current_df['trajectory_direction'].iloc[0]} ({current_df['trajectory_bearing'].iloc[0]}°)"
         )
         print(
-            f"  Position: Lat {df['spacecraft_latitude'].iloc[0]:.2f}, Lon {df['spacecraft_longitude'].iloc[0]:.2f}"
+            f"  Position: Lat {current_df['spacecraft_latitude'].iloc[0]:.2f}, Lon {current_df['spacecraft_longitude'].iloc[0]:.2f}"
         )
-        print(f"  Altitude: {df['spacecraft_altitude_km'].iloc[0]} km")
+        print(f"  Altitude: {current_df['spacecraft_altitude_km'].iloc[0]} km")
         print("\nWeather (Houston, TX):")
-        print(f"  Temperature: {df['temperature'].iloc[0]}°C")
-        print(f"  Wind Speed: {df['wind_speed'].iloc[0]} km/h")
-        print(f"  Weather Code: {df['weather_code'].iloc[0]}")
+        print(f"  Temperature: {current_df['temperature'].iloc[0]}°C")
+        print(f"  Wind Speed: {current_df['wind_speed'].iloc[0]} km/h")
+        print(f"  Weather Code: {current_df['weather_code'].iloc[0]}")
+
+        print("\n" + "=" * 70)
+        print("HISTORICAL SPACECRAFT DATA ANALYSIS")
+        print("=" * 70)
+
+        if len(history_df) > 0:
+            print(f"\nTotal historical records: {len(history_df)}")
+            print(
+                f"Date range: {history_df['date'].iloc[0]} to {history_df['date'].iloc[-1]}"
+            )
+
+            print("\n--- Speed Statistics ---")
+            print(
+                f"  Average speed: {history_df['spacecraft_speed_kmh'].mean():.2f} km/h"
+            )
+            print(f"  Min speed: {history_df['spacecraft_speed_kmh'].min():.2f} km/h")
+            print(f"  Max speed: {history_df['spacecraft_speed_kmh'].max():.2f} km/h")
+            print(
+                f"  Std deviation: {history_df['spacecraft_speed_kmh'].std():.2f} km/h"
+            )
+
+            print("\n--- Trajectory Patterns ---")
+            trajectory_counts = history_df["trajectory_direction"].value_counts()
+            print("  Direction frequency:")
+            for direction, count in trajectory_counts.items():
+                percentage = (count / len(history_df)) * 100
+                print(f"    {direction}: {count} times ({percentage:.1f}%)")
+
+            print("\n--- Astronaut Count Trends ---")
+            print(f"  Average astronauts: {history_df['astronaut_count'].mean():.1f}")
+            print(f"  Min: {history_df['astronaut_count'].min()}")
+            print(f"  Max: {history_df['astronaut_count'].max()}")
+
+            print("\n--- Recent Flights History (Last 5 records) ---")
+            recent = history_df.tail(5)
+            for _idx, row in recent.iterrows():
+                print(
+                    f"  {row['date']}: {row['astronaut_count']} astronauts, "
+                    f"{row['spacecraft_speed_kmh']:.0f} km/h, {row['trajectory_direction']}"
+                )
+
+            # Calculate correlations if enough data points
+            if len(history_df) >= 3:
+                print("\n--- Correlation Analysis (Historical Data) ---")
+                try:
+                    from scipy.stats import pearsonr
+
+                    corr_speed, p_speed = pearsonr(
+                        history_df["astronaut_count"],
+                        history_df["spacecraft_speed_kmh"],
+                    )
+                    print(
+                        f"  Spacecraft Speed vs Astronaut Count: r={corr_speed:.3f} (p={p_speed:.3f})"
+                    )
+
+                    corr_traj, p_traj = pearsonr(
+                        history_df["astronaut_count"], history_df["trajectory_bearing"]
+                    )
+                    print(
+                        f"  Trajectory Bearing vs Astronaut Count: r={corr_traj:.3f} (p={p_traj:.3f})"
+                    )
+
+                    if abs(corr_speed) < 0.3:
+                        print(
+                            "\n  ✓ As expected, astronaut count has minimal correlation with speed"
+                        )
+                    if abs(corr_traj) < 0.3:
+                        print(
+                            "  ✓ As expected, astronaut count has minimal correlation with trajectory"
+                        )
+                except ImportError:
+                    print("  Note: scipy not available for correlation calculations")
+                except Exception as e:
+                    print(f"  Could not calculate correlations: {e}")
+
+        else:
+            print("\nNo historical data available yet.")
+            print(
+                "Run this DAG multiple times to build a history of spacecraft flights."
+            )
 
         print("\n" + "=" * 70)
         print("CORRELATION INSIGHTS:")
         print("=" * 70)
         print("\n1. Spacecraft Speed vs Astronaut Count:")
         print("   - ISS orbital velocity is typically ~27,600 km/h (7.66 km/s)")
-        print(f"   - Current speed: {df['spacecraft_speed_kmh'].iloc[0]} km/h")
+        print(f"   - Current speed: {current_df['spacecraft_speed_kmh'].iloc[0]} km/h")
         print(
             "   - Astronaut count doesn't affect orbital velocity (governed by physics)"
         )
 
         print("\n2. Trajectory Analysis:")
-        print(f"   - Current direction: {df['trajectory_direction'].iloc[0]}")
+        print(f"   - Current direction: {current_df['trajectory_direction'].iloc[0]}")
         print("   - ISS completes ~15.5 orbits per day, trajectory constantly changes")
         print("   - No correlation expected between trajectory and astronaut count")
 
         print("\n3. Weather vs Spacecraft:")
         print("   - Ground weather has no direct impact on orbital spacecraft")
         print("   - However, weather affects launch windows and crew transport")
-
-        print("\n" + "=" * 70)
-        print("NOTE: Correlation analysis requires multiple data points.")
-        print("This DAG would need to run multiple times and store results")
-        print("to build a historical dataset for meaningful correlation.")
         print("=" * 70)
-
-        # If you have historical data, uncomment to calculate correlation:
-        # from scipy.stats import pearsonr
-        # if len(df) > 1:
-        #     corr_speed, p_speed = pearsonr(df["astronaut_count"], df["spacecraft_speed_kmh"])
-        #     corr_temp, p_temp = pearsonr(df["astronaut_count"], df["temperature"])
-        #     corr_wind, p_wind = pearsonr(df["astronaut_count"], df["wind_speed"])
-        #     print(f"\nCorrelation with Spacecraft Speed: {corr_speed:.3f} (p-value: {p_speed:.3f})")
-        #     print(f"\nCorrelation with Temperature: {corr_temp:.3f} (p-value: {p_temp:.3f})")
-        #     print(f"Correlation with Wind Speed: {corr_wind:.3f} (p-value: {p_wind:.3f})")
 
     # Use dynamic task mapping to run the print_astronaut_craft task for each
     # Astronaut in space
@@ -341,13 +517,21 @@ def example_astronauts():
     weather_data = get_weather_data()
     tracking_data = get_spacecraft_tracking_data()
 
+    # Load historical data
+    history_df = load_historical_spacecraft_data()
+
+    # Save current run to history
+    updated_history = save_spacecraft_history(
+        enriched_astronaut_list, tracking_data, history_df
+    )
+
     print_astronaut_craft.partial(greeting="Hello! :)").expand(
         person_in_space=enriched_astronaut_list  # Define dependencies using TaskFlow API syntax
     )
 
-    # Data analysis pipeline
+    # Data analysis pipeline with current and historical data
     combined_df = combine_data(enriched_astronaut_list, weather_data, tracking_data)
-    analyze_correlation(combined_df)
+    analyze_correlation(combined_df, updated_history)
 
 
 # Instantiate the DAG

@@ -59,17 +59,58 @@ def example_astronauts():
         return list_of_people_in_space
 
     @task
+    def enrich_astronaut_data(astronaut_list: list[dict]) -> list[dict]:
+        """
+        Enrich astronaut data with country and company/agency information.
+        Maps space agencies to countries and adds company/organization details.
+        """
+        # Mapping of common space agencies and their countries
+
+        enriched_list = []
+        for astronaut in astronaut_list:
+            enriched = astronaut.copy()
+
+            # Default enrichment if agency not found
+            enriched["country"] = "International"
+            enriched["company"] = "Space Agency"
+
+            # Try to determine agency based on craft or use defaults
+            craft = astronaut.get("craft", "")
+            if "ISS" in craft:
+                # For ISS crew, we'll assign based on typical crew composition
+                # In a real scenario, you'd query a proper astronaut database API
+                enriched["country"] = "International"
+                enriched["company"] = "ISS Expedition"
+            elif "Shenzhou" in craft or "Tiangong" in craft:
+                enriched["country"] = "China"
+                enriched["company"] = "China National Space Administration"
+            elif "Soyuz" in craft:
+                enriched["country"] = "Russia"
+                enriched["company"] = "Roscosmos"
+            elif "Dragon" in craft or "Crew Dragon" in craft:
+                enriched["country"] = "USA"
+                enriched["company"] = "SpaceX"
+
+            enriched_list.append(enriched)
+
+        return enriched_list
+
+    @task
     def print_astronaut_craft(greeting: str, person_in_space: dict) -> None:
         """
         This task creates a print statement with the name of an
-        Astronaut in space and the craft they are flying on from
+        Astronaut in space, their country, company, and the craft they are flying on from
         the API request results of the previous task, along with a
         greeting which is hard-coded in this example.
         """
         craft = person_in_space["craft"]
         name = person_in_space["name"]
+        country = person_in_space.get("country", "Unknown")
+        company = person_in_space.get("company", "Unknown Agency")
 
-        print(f"{name} is currently in space flying on the {craft}! {greeting}")
+        print(
+            f"{name} from {country} ({company}) is currently in space flying on the {craft}! {greeting}"
+        )
 
     @task(outlets=[Dataset("weather_data")])
     def get_weather_data(**context) -> dict:
@@ -93,18 +134,25 @@ def example_astronauts():
     @task
     def combine_data(astronauts: list[dict], weather: dict, **context) -> pd.DataFrame:
         """
-        Combine astronaut count and weather data into a pandas DataFrame.
-        In a real scenario, this would collect data over time for meaningful correlation.
+        Combine astronaut count, weather data, and astronaut details (countries, companies)
+        into a pandas DataFrame. In a real scenario, this would collect data over time
+        for meaningful correlation.
         """
         number_of_people = context["ti"].xcom_pull(
             task_ids="get_astronauts", key="number_of_people_in_space"
         )
+
+        # Extract countries and companies from astronaut list
+        countries = [a.get("country", "Unknown") for a in astronauts]
+        companies = [a.get("company", "Unknown") for a in astronauts]
 
         # Create a DataFrame with current data point
         df = pd.DataFrame(
             [
                 {
                     "astronaut_count": number_of_people,
+                    "countries": ", ".join(set(countries)),
+                    "companies": ", ".join(set(companies)),
                     "temperature": weather["temperature_2m"],
                     "wind_speed": weather["wind_speed_10m"],
                     "weather_code": weather["weather_code"],
@@ -147,14 +195,15 @@ def example_astronauts():
     # Use dynamic task mapping to run the print_astronaut_craft task for each
     # Astronaut in space
     astronaut_list = get_astronauts()
+    enriched_astronaut_list = enrich_astronaut_data(astronaut_list)
     weather_data = get_weather_data()
 
     print_astronaut_craft.partial(greeting="Hello! :)").expand(
-        person_in_space=astronaut_list  # Define dependencies using TaskFlow API syntax
+        person_in_space=enriched_astronaut_list  # Define dependencies using TaskFlow API syntax
     )
 
     # Data analysis pipeline
-    combined_df = combine_data(astronaut_list, weather_data)
+    combined_df = combine_data(enriched_astronaut_list, weather_data)
     analyze_correlation(combined_df)
 
 

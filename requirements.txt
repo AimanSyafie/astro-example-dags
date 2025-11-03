@@ -1,1 +1,4 @@
 # Astro Runtime includes the following pre-installed providers packages: https://docs.astronomer.io/astro/runtime-image-architecture#provider-packages
+
+pandas>=2.0.0
+scipy>=1.10.0
